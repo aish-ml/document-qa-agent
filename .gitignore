@@ -1,0 +1,9 @@
+.env
+__pycache__/
+*.pyc
+chroma_db/
+extracted_images/
+*.egg-info/
+dist/
+build/
+.venv/
