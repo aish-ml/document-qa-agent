@@ -10,6 +10,7 @@ Run with:
 
 import sys
 import time
+import logging
 import threading
 from pathlib import Path
 
@@ -33,6 +34,9 @@ from config import (
     LLM_PROVIDER,
     AUTO_INGEST_ON_START,
     ARXIV_AUTO_INGEST_TOPN,
+    OPENAI_MODEL,
+    GEMINI_MODEL,
+    OLLAMA_MODEL,
 )
 from utils.helpers import setup_logging
 from knowledge_base.vector_store import VectorStore
@@ -42,6 +46,7 @@ from ingestion.chunker import DocumentChunker
 from arxiv_integration.arxiv_client import ArxivClient
 
 setup_logging("INFO")
+logger = logging.getLogger(__name__)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -54,16 +59,16 @@ def _get_vector_store() -> VectorStore:
 
 
 @st.cache_resource(show_spinner="Loading AI agent…")
-def _get_agent(_vs: VectorStore) -> QAAgent:
-    return QAAgent(vector_store=_vs)
+def _get_agent(_vs: VectorStore, provider: str = None, model: str = None, api_key: str = None) -> QAAgent:
+    return QAAgent(vector_store=_vs, provider=provider, model=model, api_key=api_key)
 
 
 # ═══════════════════════════════════════════════════════════════
 # Background Ingest Helpers
 # ═══════════════════════════════════════════════════════════════
 
-def _run_pdf_ingest(vs: VectorStore, pdf_paths: list[str], key: str):
-    """Ingest PDFs in a background thread, updating session_state."""
+def _run_pdf_ingest(vs: VectorStore, pdf_paths: list[str], status: dict):
+    """Ingest PDFs in a background thread, updating shared status dict."""
     try:
         extractor = PDFExtractor(save_images=True)
         chunker = DocumentChunker()
@@ -72,7 +77,7 @@ def _run_pdf_ingest(vs: VectorStore, pdf_paths: list[str], key: str):
 
         for i, p in enumerate(pdf_paths):
             fname = Path(p).name
-            st.session_state[key] = f"Extracting {fname}… ({i+1}/{len(pdf_paths)})"
+            status["msg"] = f"Extracting {fname}… ({i+1}/{len(pdf_paths)})"
             try:
                 doc = extractor.extract(p)
                 chunks = chunker.chunk_document(doc)
@@ -83,15 +88,17 @@ def _run_pdf_ingest(vs: VectorStore, pdf_paths: list[str], key: str):
                     f"{len(doc.tables)} tables, {count} chunks"
                 )
             except Exception as e:
+                logger.error(f"PDF ingest error for {fname}: {e}")
                 details.append(f"❌ {fname} — {e}")
 
-        st.session_state[key] = "done"
-        st.session_state[f"{key}_result"] = {"total": total, "details": details}
+        status["msg"] = "done"
+        status["result"] = {"total": total, "details": details}
     except Exception as e:
-        st.session_state[key] = f"error: {e}"
+        logger.error(f"PDF ingest thread error: {e}")
+        status["msg"] = f"error: {e}"
 
 
-def _run_arxiv_ingest(vs: VectorStore, papers: list, key: str):
+def _run_arxiv_ingest(vs: VectorStore, papers: list, status: dict):
     """Download + ingest Arxiv papers in a background thread."""
     try:
         client = ArxivClient()
@@ -102,7 +109,8 @@ def _run_arxiv_ingest(vs: VectorStore, papers: list, key: str):
 
         for i, paper in enumerate(papers):
             short = paper.title[:55]
-            st.session_state[key] = f"Downloading {short}… ({i+1}/{len(papers)})"
+            status["msg"] = f"Downloading {short}… ({i+1}/{len(papers)})"
+            logger.info(f"Arxiv ingest: downloading {short}")
             pdf_path = client.download_pdf(paper, str(DOCUMENTS_DIR))
             if not pdf_path:
                 details.append(f"❌ {short} — download failed")
@@ -114,18 +122,22 @@ def _run_arxiv_ingest(vs: VectorStore, papers: list, key: str):
                 total += count
                 details.append(f"✅ {short} — {doc.total_pages}p, {count} chunks")
             except Exception as e:
+                logger.error(f"Arxiv ingest error for {short}: {e}")
                 details.append(f"❌ {short} — {e}")
 
-        st.session_state[key] = "done"
-        st.session_state[f"{key}_result"] = {"total": total, "details": details}
+        status["msg"] = "done"
+        status["result"] = {"total": total, "details": details}
+        logger.info(f"Arxiv ingest complete: {total} chunks from {len(papers)} papers")
     except Exception as e:
-        st.session_state[key] = f"error: {e}"
+        logger.error(f"Arxiv ingest thread error: {e}")
+        status["msg"] = f"error: {e}"
 
 
 def _launch_job(target, args, key):
-    """Start a daemon thread for background work."""
-    st.session_state[key] = "starting…"
-    t = threading.Thread(target=target, args=args, daemon=True)
+    """Start a daemon thread for background work using a shared status dict."""
+    status = {"msg": "starting…", "result": None}
+    st.session_state[f"{key}_status"] = status
+    t = threading.Thread(target=target, args=(*args, status), daemon=True)
     t.start()
 
 
@@ -133,10 +145,19 @@ def _launch_job(target, args, key):
 # Session State Defaults
 # ═══════════════════════════════════════════════════════════════
 
+_PROVIDER_MODELS = {
+    "gemini": GEMINI_MODEL,
+    "openai": OPENAI_MODEL,
+    "ollama": OLLAMA_MODEL,
+}
+
 _DEFAULTS = {
     "messages": [],
     "arxiv_results": [],
     "auto_ingested": False,
+    "llm_provider": LLM_PROVIDER,
+    "llm_model": _PROVIDER_MODELS.get(LLM_PROVIDER, ""),
+    "llm_api_key": "",
 }
 for k, v in _DEFAULTS.items():
     if k not in st.session_state:
@@ -148,7 +169,12 @@ for k, v in _DEFAULTS.items():
 # ═══════════════════════════════════════════════════════════════
 
 vs = _get_vector_store()
-agent = _get_agent(vs)
+agent = _get_agent(
+    vs,
+    provider=st.session_state.llm_provider,
+    model=st.session_state.llm_model or None,
+    api_key=st.session_state.llm_api_key or None,
+)
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -162,7 +188,7 @@ if AUTO_INGEST_ON_START and not st.session_state.auto_ingested:
         new_pdfs = [str(p) for p in pdfs if p.name not in existing]
         if new_pdfs:
             st.session_state.auto_ingested = True
-            _launch_job(_run_pdf_ingest, (vs, new_pdfs, "auto_status"), "auto_status")
+            _launch_job(_run_pdf_ingest, (vs, new_pdfs), "auto_status")
         else:
             st.session_state.auto_ingested = True
     else:
@@ -207,37 +233,46 @@ st.markdown(
 
 
 # ═══════════════════════════════════════════════════════════════
-# Status Banners (background jobs)
+# Status Banners (background jobs) — runs as a fragment so the
+# rest of the page stays interactive during ingestion.
 # ═══════════════════════════════════════════════════════════════
 
-def _show_status(key: str, label: str):
-    """Render a status banner and auto-rerun while busy."""
-    status = st.session_state.get(key)
-    if not status:
-        return
-    if status == "done":
-        result = st.session_state.get(f"{key}_result", {})
-        total = result.get("total", 0)
-        details = result.get("details", [])
-        with st.expander(f"✅ {label} complete — {total} chunks added", expanded=True):
-            for d in details:
-                st.markdown(d)
-            if st.button("Dismiss", key=f"dismiss_{key}"):
-                for k2 in (key, f"{key}_result"):
-                    st.session_state.pop(k2, None)
+@st.fragment(run_every=2)
+def _status_fragment():
+    """Re-runs every 2 s *independently* of the main script."""
+    _any_active = False
+    for key, label in [
+        ("auto_status", "Auto-Ingest"),
+        ("upload_status", "Upload Ingest"),
+        ("folder_status", "Folder Ingest"),
+        ("arxiv_status", "Arxiv Download & Ingest"),
+    ]:
+        status_dict = st.session_state.get(f"{key}_status")
+        if not status_dict:
+            continue
+        msg = status_dict.get("msg", "")
+        if not msg:
+            continue
+        if msg == "done":
+            result = status_dict.get("result") or {}
+            total = result.get("total", 0)
+            details = result.get("details", [])
+            with st.expander(f"✅ {label} complete — {total} chunks added", expanded=True):
+                for d in details:
+                    st.markdown(d)
+                if st.button("Dismiss", key=f"dismiss_{key}"):
+                    st.session_state.pop(f"{key}_status", None)
+                    st.rerun()
+        elif msg.startswith("error"):
+            st.error(f"{label}: {msg}")
+            if st.button("Dismiss", key=f"dismiss_err_{key}"):
+                st.session_state.pop(f"{key}_status", None)
                 st.rerun()
-    elif status.startswith("error"):
-        st.error(f"{label}: {status}")
-    else:
-        st.info(f"⏳ **{label}:** {status}")
-        time.sleep(1.5)
-        st.rerun()
+        else:
+            st.info(f"⏳ **{label}:** {msg}")
+            _any_active = True
 
-
-_show_status("auto_status", "Auto-Ingest")
-_show_status("upload_status", "Upload Ingest")
-_show_status("folder_status", "Folder Ingest")
-_show_status("arxiv_status", "Arxiv Download & Ingest")
+_status_fragment()
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -246,7 +281,53 @@ _show_status("arxiv_status", "Arxiv Download & Ingest")
 
 with st.sidebar:
     st.markdown("## 📄 Document Q&A Agent")
-    st.caption(f"Provider: **{LLM_PROVIDER}** &nbsp;|&nbsp; Chunks: **{vs.count}**")
+    st.caption(
+        f"Provider: **{st.session_state.llm_provider}** "
+        f"({st.session_state.llm_model}) "
+        f"&nbsp;|&nbsp; Chunks: **{vs.count}**"
+    )
+
+    # ── LLM Configuration ───────────────────────────────────────
+    st.markdown("### 🤖 LLM Settings")
+    _providers = ["gemini", "openai", "ollama"]
+    _cur_idx = _providers.index(st.session_state.llm_provider) if st.session_state.llm_provider in _providers else 0
+    sel_provider = st.selectbox(
+        "Provider",
+        _providers,
+        index=_cur_idx,
+        key="_sel_provider",
+    )
+    sel_model = st.text_input(
+        "Model",
+        value=st.session_state.llm_model,
+        placeholder=_PROVIDER_MODELS.get(sel_provider, ""),
+        key="_sel_model",
+    )
+    sel_api_key = st.text_input(
+        "API Key (session only)",
+        value=st.session_state.llm_api_key,
+        type="password",
+        placeholder="Leave blank to use .env key",
+        key="_sel_api_key",
+    )
+
+    _changed = (
+        sel_provider != st.session_state.llm_provider
+        or sel_model != st.session_state.llm_model
+        or sel_api_key != st.session_state.llm_api_key
+    )
+    if _changed:
+        if st.button("🔄 Apply LLM Settings", type="primary", use_container_width=True):
+            st.session_state.llm_provider = sel_provider
+            st.session_state.llm_model = sel_model or _PROVIDER_MODELS.get(sel_provider, "")
+            st.session_state.llm_api_key = sel_api_key
+            # Clear the cached agent so it gets re-created with new settings
+            _get_agent.clear()
+            st.success(f"Switched to **{sel_provider}** / **{st.session_state.llm_model}**")
+            time.sleep(0.8)
+            st.rerun()
+
+    st.divider()
 
     # ── Knowledge Base ──────────────────────────────────────────
     st.markdown("### 📚 Knowledge Base")
@@ -269,12 +350,16 @@ with st.sidebar:
     )
     if uploaded_files:
         if st.button("📥 Ingest uploaded files", type="primary", use_container_width=True):
+            # Save all uploaded files to disk first
+            DOCUMENTS_DIR.mkdir(parents=True, exist_ok=True)
             paths = []
             for f in uploaded_files:
                 dest = DOCUMENTS_DIR / f.name
                 dest.write_bytes(f.getvalue())
                 paths.append(str(dest))
-            _launch_job(_run_pdf_ingest, (vs, paths, "upload_status"), "upload_status")
+                logger.info(f"Saved uploaded file: {dest}")
+            # Launch background ingest
+            _launch_job(_run_pdf_ingest, (vs, paths), "upload_status")
             st.rerun()
 
     # ── Ingest documents/ folder ────────────────────────────────
@@ -284,7 +369,7 @@ with st.sidebar:
         if pdfs:
             _launch_job(
                 _run_pdf_ingest,
-                (vs, [str(p) for p in pdfs], "folder_status"),
+                (vs, [str(p) for p in pdfs]),
                 "folder_status",
             )
             st.rerun()
@@ -335,7 +420,7 @@ with st.sidebar:
         ):
             _launch_job(
                 _run_arxiv_ingest,
-                (vs, papers, "arxiv_status"),
+                (vs, papers),
                 "arxiv_status",
             )
             st.session_state.arxiv_results = []

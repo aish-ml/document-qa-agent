@@ -6,6 +6,7 @@ Supports multiple embedding providers (OpenAI, Gemini, Ollama).
 """
 
 import logging
+import time
 import threading
 from pathlib import Path
 
@@ -83,24 +84,56 @@ class VectorStore:
         )
 
     def add_chunks(self, chunks: list[DocumentChunk]) -> int:
-        """Add document chunks to the vector store (thread-safe)."""
+        """Add document chunks to the vector store with rate-limit retry (thread-safe)."""
         if not chunks:
             return 0
 
         documents = []
         ids = []
+        seen_ids = set()
         for chunk in chunks:
+            cid = chunk.chunk_id
+            # Deduplicate IDs within the batch
+            if cid in seen_ids:
+                cid = f"{cid}_{len(seen_ids)}"
+            seen_ids.add(cid)
             doc = Document(
                 page_content=chunk.text,
                 metadata=chunk.metadata,
             )
             documents.append(doc)
-            ids.append(chunk.chunk_id)
+            ids.append(cid)
 
-        with self._lock:
-            self.store.add_documents(documents=documents, ids=ids)
-        logger.info(f"Added {len(documents)} chunks to vector store")
-        return len(documents)
+        # Batch to avoid hitting rate limits (embed max BATCH_SIZE at a time)
+        BATCH_SIZE = 20
+        total_added = 0
+        for start in range(0, len(documents), BATCH_SIZE):
+            batch_docs = documents[start:start + BATCH_SIZE]
+            batch_ids = ids[start:start + BATCH_SIZE]
+            max_retries = 5
+            for attempt in range(max_retries):
+                try:
+                    with self._lock:
+                        self.store.add_documents(documents=batch_docs, ids=batch_ids)
+                    total_added += len(batch_docs)
+                    break
+                except Exception as e:
+                    err_str = str(e)
+                    if "429" in err_str or "RESOURCE_EXHAUSTED" in err_str:
+                        wait = min(60, 10 * (attempt + 1))
+                        logger.warning(
+                            f"Rate limited on embed batch {start//BATCH_SIZE+1}, "
+                            f"retrying in {wait}s (attempt {attempt+1}/{max_retries})"
+                        )
+                        time.sleep(wait)
+                    else:
+                        logger.error(f"Failed to add batch: {e}")
+                        raise
+            else:
+                logger.error(f"Exhausted retries for batch starting at index {start}")
+
+        logger.info(f"Added {total_added} chunks to vector store")
+        return total_added
 
     def search(
         self,

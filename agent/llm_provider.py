@@ -86,6 +86,7 @@ def create_llm(
     model: str | None = None,
     temperature: float = 0.2,
     max_tokens: int | None = None,
+    api_key: str | None = None,
 ) -> BaseChatModel:
     """
     Create a LangChain chat model for the specified provider.
@@ -95,6 +96,7 @@ def create_llm(
         model: Model name override
         temperature: Sampling temperature
         max_tokens: Max response tokens
+        api_key: Optional API key override (session-only, not persisted)
 
     Returns:
         Configured LangChain ChatModel
@@ -107,7 +109,7 @@ def create_llm(
 
         model = model or OPENAI_MODEL
         llm = ChatOpenAI(
-            api_key=OPENAI_API_KEY,
+            api_key=api_key or OPENAI_API_KEY,
             model=model,
             temperature=temperature,
             max_tokens=max_tokens,
@@ -119,7 +121,7 @@ def create_llm(
 
         model = model or GEMINI_MODEL
         llm = ChatGoogleGenerativeAI(
-            google_api_key=GEMINI_API_KEY,
+            google_api_key=api_key or GEMINI_API_KEY,
             model=model,
             temperature=temperature,
             max_output_tokens=max_tokens,
@@ -162,8 +164,9 @@ class ManagedLLM:
         provider: str | None = None,
         model: str | None = None,
         temperature: float = 0.2,
+        api_key: str | None = None,
     ):
-        self.llm = create_llm(provider, model, temperature)
+        self.llm = create_llm(provider, model, temperature, api_key=api_key)
         self.cache = ResponseCache() if ENABLE_CACHE else None
         self.rate_limiter = RateLimiter()
         self.provider = provider or LLM_PROVIDER

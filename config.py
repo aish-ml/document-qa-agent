@@ -32,7 +32,7 @@ OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3")
 
 # ── Embeddings ───────────────────────────────────────────────────
 EMBEDDING_PROVIDER = os.getenv("EMBEDDING_PROVIDER", "gemini").lower()
-EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "models/embedding-001")
+EMBEDDING_MODEL = os.getenv("EMBEDDING_MODEL", "models/gemini-embedding-001")
 
 # ── Chunking ─────────────────────────────────────────────────────
 CHUNK_SIZE = int(os.getenv("CHUNK_SIZE", "1000"))

@@ -49,6 +49,7 @@ class DocumentChunker:
         Processes: body text by section, tables, and image captions.
         """
         chunks: list[DocumentChunk] = []
+        _sec_counter = 0
 
         # ── 1. Chunk sections ────────────────────────────────────
         for section in doc.sections:
@@ -58,7 +59,7 @@ class DocumentChunker:
             section_chunks = self.splitter.split_text(section.content)
             for i, text in enumerate(section_chunks):
                 chunk = DocumentChunk(
-                    chunk_id=f"{doc.doc_id}_sec_{section.section_type}_{i}",
+                    chunk_id=f"{doc.doc_id}_sec{_sec_counter}_{section.section_type}_{i}",
                     text=text,
                     metadata={
                         "source": doc.file_name,
@@ -73,6 +74,7 @@ class DocumentChunker:
                     },
                 )
                 chunks.append(chunk)
+            _sec_counter += 1
 
         # ── 2. Chunk tables (as Markdown) ────────────────────────
         for table in doc.tables:

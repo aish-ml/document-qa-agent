@@ -13,7 +13,8 @@ An enterprise-ready AI agent that ingests PDF documents and enables intelligent 
 - **Arxiv Integration** (Bonus) — Search and download papers from Arxiv directly into the knowledge base
 - **Auto-Ingest on Startup** — PDFs in `documents/` are automatically ingested when the agent starts
 - **Arxiv Auto-Ingest** — Search Arxiv and download+ingest top N papers in one step
-- **Streamlit Web UI** — Beautiful chat interface with PDF upload, Arxiv search, and background ingestion
+- **Streamlit Web UI** — Beautiful chat interface with PDF upload, Arxiv search, background ingestion, and runtime LLM configuration
+- **Runtime LLM Configuration** — Switch LLM provider, model, and API key from the UI without restarting
 - **Background Ingestion** — Non-blocking worker thread processes PDFs while you keep chatting
 - **Enterprise Features** — Response caching, rate limiting, conversation memory, context window management, retry logic, thread-safe vector store
 
@@ -124,6 +125,7 @@ streamlit run ui/streamlit_app.py
 This opens a browser with:
 - **Chat interface** — Ask questions, get answers with source citations
 - **PDF upload** — Drag & drop PDFs into the sidebar
+- **LLM settings** — Switch provider (OpenAI / Gemini / Ollama), model, and API key at runtime without restarting
 - **Auto-ingest** — PDFs in `documents/` are ingested automatically on first load
 - **Arxiv search** — Search, browse results, and click "Download & Ingest All" to load papers
 - **Background ingestion** — All ingestion runs non-blocking; keep chatting while it works

@@ -59,9 +59,10 @@ class QAAgent:
         vector_store: VectorStore,
         provider: str | None = None,
         model: str | None = None,
+        api_key: str | None = None,
     ):
         self.vector_store = vector_store
-        self.managed_llm = ManagedLLM(provider=provider, model=model)
+        self.managed_llm = ManagedLLM(provider=provider, model=model, api_key=api_key)
         self.llm = self.managed_llm.langchain_llm
         self.conversation_history: list = []
 
